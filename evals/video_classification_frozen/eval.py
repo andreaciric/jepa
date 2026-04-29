@@ -115,6 +115,9 @@ def main(args_eval, resume_preempt=False):
     # -- EXPERIMENT-ID/TAG (optional)
     resume_checkpoint = args_eval.get('resume_checkpoint', False) or resume_preempt
     eval_tag = args_eval.get('tag', None)
+    train_only = args_eval.get('train_only', False)
+    validation_only = args_eval.get('validation_only', False)
+    validation_checkpoint_path = args_eval.get('validation_checkpoint_path', None)
 
     # ----------------------------------------------------------------------- #
 
@@ -232,6 +235,14 @@ def main(args_eval, resume_preempt=False):
 
     # -- load training checkpoint
     start_epoch = 0
+    if train_only and validation_only:
+        raise ValueError('train_only and validation_only cannot both be true')
+
+    if validation_only and validation_checkpoint_path is not None:
+        classifier = load_classifier_checkpoint(
+            device=device,
+            r_path=validation_checkpoint_path,
+            classifier=classifier)
     if resume_checkpoint:
         classifier, optimizer, scaler, start_epoch = load_checkpoint(
             device=device,
@@ -242,6 +253,25 @@ def main(args_eval, resume_preempt=False):
         for _ in range(start_epoch*ipe):
             scheduler.step()
             wd_scheduler.step()
+
+    if validation_only:
+        logger.info('Running in validation-only mode (no training updates).')
+        val_acc = run_one_epoch(
+            device=device,
+            training=False,
+            num_temporal_views=eval_num_segments,
+            attend_across_segments=attend_across_segments,
+            num_spatial_views=eval_num_views_per_segment,
+            encoder=encoder,
+            classifier=classifier,
+            scaler=scaler,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            wd_scheduler=wd_scheduler,
+            data_loader=val_loader,
+            use_bfloat16=use_bfloat16)
+        logger.info('[VAL-ONLY] test: %.3f%%' % (val_acc,))
+        return val_acc
 
     def save_checkpoint(epoch):
         save_dict = {
@@ -274,22 +304,25 @@ def main(args_eval, resume_preempt=False):
             data_loader=train_loader,
             use_bfloat16=use_bfloat16)
 
-        val_acc = run_one_epoch(
-            device=device,
-            training=False,
-            num_temporal_views=eval_num_segments,
-            attend_across_segments=attend_across_segments,
-            num_spatial_views=eval_num_views_per_segment,
-            encoder=encoder,
-            classifier=classifier,
-            scaler=scaler,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            wd_scheduler=wd_scheduler,
-            data_loader=val_loader,
-            use_bfloat16=use_bfloat16)
-
-        logger.info('[%5d] train: %.3f%% test: %.3f%%' % (epoch + 1, train_acc, val_acc))
+        if train_only:
+            val_acc = float('nan')
+            logger.info('[%5d] train-only: %.3f%%' % (epoch + 1, train_acc))
+        else:
+            val_acc = run_one_epoch(
+                device=device,
+                training=False,
+                num_temporal_views=eval_num_segments,
+                attend_across_segments=attend_across_segments,
+                num_spatial_views=eval_num_views_per_segment,
+                encoder=encoder,
+                classifier=classifier,
+                scaler=scaler,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                wd_scheduler=wd_scheduler,
+                data_loader=val_loader,
+                use_bfloat16=use_bfloat16)
+            logger.info('[%5d] train: %.3f%% test: %.3f%%' % (epoch + 1, train_acc, val_acc))
         if rank == 0:
             csv_logger.log(epoch + 1, train_acc, val_acc)
         save_checkpoint(epoch + 1)
@@ -315,12 +348,16 @@ def run_one_epoch(
     criterion = torch.nn.CrossEntropyLoss()
     top1_meter = AverageMeter()
     for itr, data in enumerate(data_loader):
+        if (not training) and len(data) > 3:
+            sample_info = data[3]
+            if isinstance(sample_info, (list, tuple)) and len(sample_info) > 0:
+                logger.info(f'[inference] processing file: {sample_info[0]}')
 
         if training:
             scheduler.step()
             wd_scheduler.step()
 
-        with torch.cuda.amp.autocast(dtype=torch.float16, enabled=use_bfloat16):
+        with torch.amp.autocast('cuda', dtype=torch.float16, enabled=use_bfloat16):
 
             # Load data and put on GPU
             clips = [
@@ -409,6 +446,20 @@ def load_checkpoint(
         epoch = 0
 
     return classifier, opt, scaler, epoch
+
+
+def load_classifier_checkpoint(
+    device,
+    r_path,
+    classifier
+):
+    checkpoint = torch.load(r_path, map_location=torch.device('cpu'))
+    pretrained_dict = checkpoint.get('classifier', checkpoint)
+    msg = classifier.load_state_dict(pretrained_dict)
+    logger.info(f'loaded classifier for validation-only with msg: {msg}')
+    logger.info(f'read-path: {r_path}')
+    del checkpoint
+    return classifier
 
 
 def load_pretrained(

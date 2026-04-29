@@ -353,34 +353,70 @@ python -m app.main_distributed \
 
 ### Local training
 If you wish to debug your eval code or setup before launching a distributed training run, we provide the functionality to do so by running the evaluation script locally on a multi-GPU (or single-GPU) machine, however, reproducing the full eval would require launching distributed training.
-The single-machine implementation starts from the [eval/main.py](eval/main.py), which parses the experiment config file and runs the eval locally on a multi-GPU (or single-GPU) machine.
+The single-machine implementation starts from the [evals/main.py](evals/main.py), which parses the experiment config file and runs the eval locally on a multi-GPU (or single-GPU) machine.
 
-For example, to run ImageNet image classification on GPUs "0", "1", and "2" on a local machine using the config [configs/eval/vitl16_in1k.yaml](configs/eval/vitl16_in1k.yaml), type the command:
+For example, to run ImageNet image classification on GPUs "0", "1", and "2" on a local machine using the config [configs/evals/vitl16_in1k.yaml](configs/evals/vitl16_in1k.yaml), type the command:
 ```bash
 python -m evals.main \
-  --fname configs/eval/vitl16_in1k.yaml \
+  --fname configs/evals/vitl16_in1k.yaml \
   --devices cuda:0 cuda:1 cuda:2
 ```
 
 
 ### Distributed training
-To launch a distributed evaluation run, the implementation starts from [eval/main_distributed.py](eval/main_distributed.py), which, in addition to parsing the config file, also allows for specifying details about distributed training. For distributed training, we use the popular open-source [submitit](https://github.com/facebookincubator/submitit) tool and provide examples for a SLURM cluster.
+To launch a distributed evaluation run, the implementation starts from [evals/main_distributed.py](evals/main_distributed.py), which, in addition to parsing the config file, also allows for specifying details about distributed training. For distributed training, we use the popular open-source [submitit](https://github.com/facebookincubator/submitit) tool and provide examples for a SLURM cluster.
 
-For example, to launch a distributed ImageNet image classification experiment using the config [configs/eval/vitl16_in1k.yaml](configs/eval/vitl16_in1k.yaml), type the command:
+For example, to launch a distributed ImageNet image classification experiment using the config [configs/evals/vitl16_in1k.yaml](configs/evals/vitl16_in1k.yaml), type the command:
 ```bash
 python -m evals.main_distributed \
-  --fname configs/eval/vitl16_in1k.yaml \
+  --fname configs/evals/vitl16_in1k.yaml \
   --folder $path_to_save_stderr_and_stdout \
   --partition $slurm_partition
 ```
 
-Similarly, to launch a distributed K400 video classification experiment using the config [configs/eval/vitl16_k400.yaml](configs/eval/vitl16_k400.yaml), type the command:
+Similarly, to launch a distributed K400 video classification experiment using the config [configs/evals/vitl16_k400_16x8x3.yaml](configs/evals/vitl16_k400_16x8x3.yaml), type the command:
 ```bash
 python -m evals.main_distributed \
-  --fname configs/eval/vitl16_k400.yaml \
+  --fname configs/evals/vitl16_k400_16x8x3.yaml \
   --folder $path_to_save_stderr_and_stdout \
   --partition $slurm_partition
 ```
+
+### Evaluation outputs
+Evaluation writes artifacts under the pretraining checkpoint folder configured in `pretrain.folder`:
+- image classification evals write to `<pretrain.folder>/image_classification_frozen[/<tag>]`
+- video classification evals write to `<pretrain.folder>/video_classification_frozen[/<tag>]`
+
+Inside that directory, each run writes:
+- a per-rank CSV log file: `<write_tag>_r<rank>.csv` (epoch-level train/test accuracy)
+- a latest checkpoint: `<write_tag>-latest.pth.tar` (classifier + optimizer/scaler states)
+
+During runtime, stdout logs progress including per-iteration loss/accuracy and per-epoch train/test accuracy.
+For probe training, each epoch runs exactly `len(train_loader)` optimization steps (one step per batch); e.g., if your training dataloader has 241 batches, one epoch performs 241 update steps.
+
+### Saving the trained attentive probe checkpoint
+The attentive probe classifier checkpoint is saved automatically during evaluation as:
+- `<write_tag>-latest.pth.tar`
+
+This file is written in the output directory above (image or video eval folder), and is updated at the end of each epoch.
+
+To keep multiple probe checkpoints from different runs, use a different `pretrain.write_tag` and/or top-level eval `tag` in each config.
+For example:
+- `pretrain.write_tag: jepa_probe_run1`
+- `tag: in1k-run1`
+
+To resume probe training from the latest saved checkpoint in that folder, set:
+- `resume_checkpoint: true`
+
+To run validation only (skip probe training), set:
+- `validation_only: true`
+
+In validation-only mode, you will typically also set:
+- `resume_checkpoint: true` (to evaluate a previously trained probe from `<write_tag>-latest.pth.tar`)
+- or pass `validation_checkpoint_path: /absolute/path/to/your_probe_checkpoint.pth.tar`
+
+To run training only (skip validation passes), set:
+- `train_only: true`
 
 ---
 
